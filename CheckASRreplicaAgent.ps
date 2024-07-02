@@ -1,0 +1,93 @@
+# Ensure you have installed and configured the Azure PowerShell module
+
+# Log in to Azure
+Connect-AzAccount
+
+# Specify the subscription (optional if already connected to the correct subscription)
+Set-AzContext -SubscriptionId "<mysubscriptionID>"
+
+# Specify the name of the Recovery Services Vault and the resource group
+$resourceGroupName = "<ResourceGroupName>"
+$vaultName = "<ServiceVaultName>"
+
+# Get the Recovery Services Vault
+$vault = Get-AzRecoveryServicesVault -ResourceGroupName $resourceGroupName -Name $vaultName
+
+if ($vault -eq $null) {
+    Write-Error "Vault not found. Please check the vault name and resource group."
+    exit
+}
+
+# Set the context of the Recovery Services Vault
+Set-AzRecoveryServicesVaultContext -Vault $vault
+Set-AzRecoveryServicesAsrVaultContext -Vault $vault
+
+# Get all fabrics associated with the Recovery Services Vault
+try {
+    $fabrics = Get-AzRecoveryServicesAsrFabric
+} catch {
+    Write-Error "Error getting fabrics: $_"
+    exit
+}
+
+if ($fabrics.Count -eq 0) {
+    Write-Error "No fabrics found."
+    exit
+}
+
+# List of replicated items that require an update
+$itemsToUpdate = @()
+
+# Iterate through each fabric to get the Protection Containers
+foreach ($fabric in $fabrics) {
+    try {
+        # Get the Protection Containers for the specified fabric
+        $protectionContainers = Get-AzRecoveryServicesAsrProtectionContainer -Fabric $fabric
+    } catch {
+        Write-Error "Error getting Protection Containers for fabric $($fabric.FriendlyName): $_"
+        continue
+    }
+
+    # Iterate through each Protection Container to get the replicated items
+    foreach ($container in $protectionContainers) {
+        try {
+            # Get the replicated items for the specified container
+            $replicatedItems = Get-AzRecoveryServicesAsrReplicationProtectedItem -ProtectionContainer $container
+        } catch {
+            Write-Error "Error getting replicated items for container $($container.Name): $_"
+            continue
+        }
+
+        # Check the Site Recovery Replication Agent status for each replicated item
+        foreach ($item in $replicatedItems) {
+            # Get provider-specific details
+            $providerDetails = $item.ProviderSpecificDetails
+            $vmName = $item.ReplicationProtectedItemFriendlyName
+
+            # Extract the VM name from FabricObjectId if ReplicationProtectedItemFriendlyName is empty
+            if ([string]::IsNullOrWhiteSpace($vmName)) {
+                $vmName = ($providerDetails.FabricObjectId -split '/')[-1]
+            }
+
+            # Check if the replication agent update is required
+            if ($providerDetails.IsReplicationAgentUpdateRequired -eq $true) {
+                $itemsToUpdate += [PSCustomObject]@{
+                    VMName                      = $vmName
+                    AgentVersion                = $providerDetails.AgentVersion
+                    IsReplicationAgentUpdateRequired = $providerDetails.IsReplicationAgentUpdateRequired
+                    PrimaryFabricFriendlyName   = $item.PrimaryFabricFriendlyName
+                    RecoveryFabricFriendlyName  = $item.RecoveryFabricFriendlyName
+                }
+            }
+        }
+    }
+}
+
+# Path to the CSV file
+$outputFile = ".\output.csv"
+
+# Export the replicated items that require an update to a CSV file
+$itemsToUpdate | Export-Csv -Path $outputFile -NoTypeInformation
+
+# Confirmation message
+Write-Output "Export completed. File saved to: $outputFile"
